@@ -1,3 +1,122 @@
+<?php /*><!-- Keeps this PHP block hidden if the page is ever opened without PHP (file://, static host). */
+/*
+ * Cart PDF -> WhatsApp (Meta WhatsApp Business Cloud API).
+ * When a customer downloads the cart PDF, the page POSTs the same PDF here and it is sent
+ * to the owner numbers below. Credentials come from server environment variables only:
+ *   WA_TOKEN            permanent System User access token
+ *   WA_PHONE_NUMBER_ID  Phone Number ID of the WhatsApp Business sender number
+ *   WA_TEMPLATE         (optional) approved template name with a DOCUMENT header;
+ *                       required for delivery outside the 24-hour customer service window
+ *   WA_TEMPLATE_LANG    (optional) template language code, default "en"
+ */
+if (($_GET['action'] ?? '') === 'send-cart-pdf') {
+    header('Content-Type: application/json');
+    header('X-Content-Type-Options: nosniff');
+    $respond = function ($code, $data) {
+        http_response_code($code);
+        echo json_encode($data);
+        exit;
+    };
+
+    $WA_RECIPIENTS = ['919352470085', '919024598298', '918561049848'];
+    $MAX_PDF_BYTES = 3 * 1024 * 1024;
+    $RATE_LIMIT = 5;          // PDFs per IP...
+    $RATE_WINDOW = 15 * 60;   // ...per 15 minutes
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') $respond(405, ['ok' => false, 'error' => 'Method not allowed']);
+    $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+    if ($origin !== '' && parse_url($origin, PHP_URL_HOST) !== parse_url('//' . ($_SERVER['HTTP_HOST'] ?? ''), PHP_URL_HOST)) {
+        $respond(403, ['ok' => false, 'error' => 'Forbidden']);
+    }
+
+    $token = getenv('WA_TOKEN');
+    $phoneId = getenv('WA_PHONE_NUMBER_ID');
+    if (!$token || !$phoneId || !function_exists('curl_init')) {
+        error_log('Cart PDF WhatsApp: WA_TOKEN / WA_PHONE_NUMBER_ID not set or PHP curl missing');
+        $respond(503, ['ok' => false, 'error' => 'Not configured']);
+    }
+
+    // Simple per-IP rate limit so the endpoint cannot be used to spam the owner numbers.
+    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $rlFile = sys_get_temp_dir() . '/sc_pdf_rl_' . hash('sha256', $ip);
+    $now = time();
+    $hits = array_filter((array) json_decode((string) @file_get_contents($rlFile), true), function ($t) use ($now, $RATE_WINDOW) {
+        return is_int($t) && $t > $now - $RATE_WINDOW;
+    });
+    if (count($hits) >= $RATE_LIMIT) $respond(429, ['ok' => false, 'error' => 'Too many requests']);
+    $hits[] = $now;
+    @file_put_contents($rlFile, json_encode(array_values($hits)), LOCK_EX);
+
+    $file = $_FILES['pdf'] ?? null;
+    if (!$file || $file['error'] !== UPLOAD_ERR_OK || $file['size'] <= 0 || $file['size'] > $MAX_PDF_BYTES) {
+        $respond(400, ['ok' => false, 'error' => 'Invalid file']);
+    }
+    $fh = fopen($file['tmp_name'], 'rb');
+    $magic = $fh ? fread($fh, 5) : '';
+    if ($fh) fclose($fh);
+    if ($magic !== '%PDF-') $respond(400, ['ok' => false, 'error' => 'Invalid file']);
+
+    $filename = preg_replace('/[^A-Za-z0-9._-]/', '-', basename((string) ($_POST['filename'] ?? 'Cart.pdf')));
+    if (!preg_match('/\.pdf$/i', $filename)) $filename .= '.pdf';
+    $filename = substr($filename, -100);
+
+    $graph = function ($path, $fields, $isJson) use ($token) {
+        $ch = curl_init('https://graph.facebook.com/v21.0/' . $path);
+        $headers = ['Authorization: Bearer ' . $token];
+        if ($isJson) $headers[] = 'Content-Type: application/json';
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $isJson ? json_encode($fields) : $fields,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 30,
+        ]);
+        $body = curl_exec($ch);
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        return [$status, json_decode((string) $body, true), $body];
+    };
+
+    // 1) Upload the PDF once, 2) send it to every recipient by media id.
+    [$st, $media, $raw] = $graph($phoneId . '/media', [
+        'messaging_product' => 'whatsapp',
+        'type' => 'application/pdf',
+        'file' => new CURLFile($file['tmp_name'], 'application/pdf', $filename),
+    ], false);
+    if ($st !== 200 || empty($media['id'])) {
+        error_log('Cart PDF WhatsApp media upload failed: ' . $raw);
+        $respond(502, ['ok' => false, 'error' => 'Upload failed']);
+    }
+
+    $document = ['id' => $media['id'], 'filename' => $filename];
+    $template = getenv('WA_TEMPLATE');
+    $sent = 0;
+    foreach ($WA_RECIPIENTS as $to) {
+        $msg = ['messaging_product' => 'whatsapp', 'to' => $to];
+        if ($template) {
+            $msg['type'] = 'template';
+            $msg['template'] = [
+                'name' => $template,
+                'language' => ['code' => getenv('WA_TEMPLATE_LANG') ?: 'en'],
+                'components' => [[
+                    'type' => 'header',
+                    'parameters' => [['type' => 'document', 'document' => $document]],
+                ]],
+            ];
+        } else {
+            $msg['type'] = 'document';
+            $msg['document'] = $document + ['caption' => 'New cart PDF downloaded from the website'];
+        }
+        [$st, , $raw] = $graph($phoneId . '/messages', $msg, true);
+        if ($st === 200) {
+            $sent++;
+        } else {
+            error_log('Cart PDF WhatsApp send to ' . $to . ' failed: ' . $raw);
+        }
+    }
+    $respond($sent ? 200 : 502, ['ok' => $sent > 0, 'sent' => $sent]);
+}
+/* --><? */ ?>
 <!doctype html>
 <!-- Automobile 10-10-26-->
 <html lang="en">
@@ -3649,6 +3768,137 @@
                 background: linear-gradient(90deg, #dc2626, #f97316, #fbbf24);
                 box-shadow: 0 0 12px rgba(249, 115, 22, 0.6);
             }
+
+            /* ---------- Ten days to Vijayadashami ---------- */
+            .dussehra-days {
+                position: relative;
+                padding: 2.5rem 0 1.5rem;
+            }
+
+            .dussehra-days-title {
+                font-family: var(--font-festive);
+                font-size: clamp(1.6rem, 1.2rem + 1.8vw, 2.4rem);
+                text-align: center;
+                color: #b91c1c;
+                text-shadow: 0 0 18px rgba(251, 191, 36, 0.45);
+                margin-bottom: 0.25rem;
+            }
+
+            .dussehra-days-sub {
+                text-align: center;
+                color: #78350f;
+                font-size: 0.95rem;
+                margin-bottom: 1.5rem;
+            }
+
+            .dussehra-days-list {
+                display: grid;
+                grid-template-columns: repeat(5, minmax(0, 1fr));
+                gap: 14px;
+                max-width: 72rem;
+                margin: 0 auto;
+            }
+
+            .dussehra-day {
+                position: relative;
+                padding: 18px 14px 16px;
+                border-radius: 18px;
+                text-align: center;
+                background: linear-gradient(160deg, #fff7ed, #ffedd5);
+                border: 1.5px solid rgba(234, 88, 12, 0.35);
+                box-shadow: 0 10px 24px -12px rgba(154, 52, 18, 0.45);
+                transition:
+                    transform 0.3s var(--ease-standard),
+                    box-shadow 0.3s var(--ease-standard);
+            }
+
+            .dussehra-day::before {
+                content: "";
+                position: absolute;
+                inset: 5px;
+                border-radius: 14px;
+                border: 1px dashed rgba(220, 38, 38, 0.3);
+                pointer-events: none;
+            }
+
+            .dussehra-day:hover {
+                transform: translateY(-4px);
+                box-shadow: 0 16px 30px -12px rgba(220, 38, 38, 0.45);
+            }
+
+            .dussehra-day.is-main {
+                background: linear-gradient(160deg, var(--dussehra-maroon), var(--dussehra-vermilion));
+                border-color: var(--dussehra-gold);
+                color: #fff7ed;
+                box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.3), 0 16px 34px -12px rgba(220, 38, 38, 0.7);
+            }
+
+            .dussehra-day-icon {
+                display: block;
+                font-size: 2rem;
+                line-height: 1;
+                margin-bottom: 8px;
+                filter: drop-shadow(0 0 8px rgba(249, 115, 22, 0.6));
+            }
+
+            .dussehra-day-num {
+                display: inline-block;
+                font-size: 0.65rem;
+                font-weight: 700;
+                letter-spacing: 0.16em;
+                text-transform: uppercase;
+                color: #c2410c;
+            }
+
+            .dussehra-day.is-main .dussehra-day-num {
+                color: #fde68a;
+            }
+
+            .dussehra-day h3 {
+                font-family: var(--font-festive);
+                font-size: 1.15rem;
+                margin: 2px 0 4px;
+                color: #991b1b;
+            }
+
+            .dussehra-day.is-main h3 {
+                color: #fde68a;
+            }
+
+            .dussehra-day p {
+                font-size: 0.8rem;
+                line-height: 1.45;
+                color: #57534e;
+            }
+
+            .dussehra-day.is-main p {
+                color: #ffedd5;
+            }
+
+            @media (max-width: 1023px) {
+                .dussehra-days-list {
+                    grid-template-columns: repeat(3, minmax(0, 1fr));
+                }
+            }
+
+            @media (max-width: 639px) {
+                .dussehra-days-title [lang="hi"] {
+                    display: block;
+                }
+
+                .dussehra-days-sep {
+                    display: none;
+                }
+
+                .dussehra-days-list {
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                }
+
+                .dussehra-day.is-main {
+                    grid-column: 1 / -1;
+                    order: -1;
+                }
+            }
         </style>
         <script type="application/ld+json">
             {
@@ -4149,6 +4399,52 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            </section>
+
+            <section class="dussehra-days" id="dussehra-days" aria-labelledby="dussehraDaysTitle">
+                <div class="container mx-auto px-4">
+                    <div class="text-center">
+                        <span class="section-eyebrow">Navratri to Vijayadashami</span>
+                        <h2 class="dussehra-days-title" id="dussehraDaysTitle">
+                            <span lang="hi">नौ रातें, एक विजय</span><span class="dussehra-days-sep"> · </span>Ten Days of Dussehra
+                        </h2>
+                        <p class="dussehra-days-sub">
+                            On Ayudha Puja, vehicles are washed and decorated for blessings. Give yours a festive shine.
+                        </p>
+                    </div>
+                    <ol class="dussehra-days-list">
+                        <li class="dussehra-day">
+                            <span class="dussehra-day-icon" aria-hidden="true">🪔</span>
+                            <span class="dussehra-day-num">Day 1</span>
+                            <h3>Ghatasthapana</h3>
+                            <p>Navratri begins as the kalash is installed and Maa Durga is welcomed home.</p>
+                        </li>
+                        <li class="dussehra-day">
+                            <span class="dussehra-day-icon" aria-hidden="true">💃</span>
+                            <span class="dussehra-day-num">Nights 1–9</span>
+                            <h3>Garba &amp; Dandiya</h3>
+                            <p>Nine nights of devotion, fasting and dance to the nine forms of the Goddess.</p>
+                        </li>
+                        <li class="dussehra-day">
+                            <span class="dussehra-day-icon" aria-hidden="true">🔱</span>
+                            <span class="dussehra-day-num">Day 8</span>
+                            <h3>Durga Ashtami</h3>
+                            <p>Kanya puja, where young girls are honoured as forms of Maa Durga.</p>
+                        </li>
+                        <li class="dussehra-day">
+                            <span class="dussehra-day-icon" aria-hidden="true">🚗</span>
+                            <span class="dussehra-day-num">Day 9</span>
+                            <h3>Ayudha Puja</h3>
+                            <p>Tools, machines and vehicles are cleaned, decorated and worshipped.</p>
+                        </li>
+                        <li class="dussehra-day is-main">
+                            <span class="dussehra-day-icon" aria-hidden="true">🏹</span>
+                            <span class="dussehra-day-num">Day 10</span>
+                            <h3>Vijayadashami</h3>
+                            <p>Ravan effigies burn to mark Lord Ram's victory of good over evil.</p>
+                        </li>
+                    </ol>
                 </div>
             </section>
 
@@ -5397,6 +5693,19 @@
                 return `INR ${toWords(rupees)}${paise ? ` and ${twoDigits(paise)} Paise` : ""} Only`;
             }
 
+            // Sends the downloaded cart PDF to the owner WhatsApp numbers via the PHP endpoint at the
+            // top of this file. Fire-and-forget: a failure never affects the customer's download.
+            function sendCartPdfToWhatsApp(blob, fileName) {
+                const form = new FormData();
+                form.append("pdf", blob, fileName);
+                form.append("filename", fileName);
+                fetch("?action=send-cart-pdf", { method: "POST", body: form, credentials: "same-origin" })
+                    .then((res) => {
+                        if (!res.ok) console.warn("Cart PDF WhatsApp send failed:", res.status);
+                    })
+                    .catch((err) => console.warn("Cart PDF WhatsApp send failed:", err));
+            }
+
             async function downloadCartPdf(btn) {
                 const keys = Object.keys(cart);
                 if (!keys.length) return;
@@ -5730,8 +6039,10 @@ doc.text("Company's Bank Details", bx, lowTop + 3.8);
                         }
                     }
 
-                    doc.save(`Swapnil-Chemicals-Invoice-${invoiceNo.replace(/\//g, "-")}.pdf`);
+                    const pdfFileName = `Swapnil-Chemicals-Invoice-${invoiceNo.replace(/\//g, "-")}.pdf`;
+                    doc.save(pdfFileName);
                     flyPdfToDownloads(btn);
+                    sendCartPdfToWhatsApp(doc.output("blob"), pdfFileName);
                 } catch (err) {
                     console.error("Cart PDF generation failed:", err);
                     alert("Could not create the PDF. Please check your internet connection and try again.");

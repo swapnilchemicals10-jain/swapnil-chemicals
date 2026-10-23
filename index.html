@@ -5835,17 +5835,41 @@ if (($_GET['action'] ?? '') === 'send-cart-pdf') {
             }
 
             // Sends the downloaded cart PDF to the owner WhatsApp numbers via the PHP endpoint at the
-            // top of this file. Fire-and-forget: a failure never affects the customer's download.
-            function sendCartPdfToWhatsApp(blob, fileName) {
-                const form = new FormData();
-                form.append("pdf", blob, fileName);
-                form.append("filename", fileName);
-                fetch("?action=send-cart-pdf", { method: "POST", body: form, credentials: "same-origin" })
-                    .then((res) => {
-                        if (!res.ok) console.warn("Cart PDF WhatsApp send failed:", res.status);
-                    })
-                    .catch((err) => console.warn("Cart PDF WhatsApp send failed:", err));
-            }
+            // top of this file. Fire-and-forget: a failure never affects the customer's download.''
+
+            // function sendCartPdfToWhatsApp(blob, fileName) {
+            //     const form = new FormData();
+            //     form.append("pdf", blob, fileName);
+            //     form.append("filename", fileName);
+            //     fetch("?action=send-cart-pdf", { method: "POST", body: form, credentials: "same-origin" })
+            //         .then((res) => {
+            //             if (!res.ok) console.warn("Cart PDF WhatsApp send failed:", res.status);
+            //         })
+            //         .catch((err) => console.warn("Cart PDF WhatsApp send failed:", err));
+            // }
+
+
+            // new code after getting error in console 23-10-26
+
+            
+            // The PHP endpoint only exists on a PHP host. GitHub Pages and other static hosts can't run it,
+// so the upload is skipped there. Add your PHP domain here once the site is hosted on one.
+const PHP_HOSTS = []; // e.g. ["swapnilchemicals.com", "www.swapnilchemicals.com"]
+
+function sendCartPdfToWhatsApp(blob, fileName) {
+    if (!PHP_HOSTS.includes(location.hostname)) return; // static host: no PHP endpoint available
+    const form = new FormData();
+    form.append("pdf", blob, fileName);
+    form.append("filename", fileName);
+    fetch("?action=send-cart-pdf", { method: "POST", body: form, credentials: "same-origin" })
+        .then((res) => {
+            if (!res.ok) console.warn("Cart PDF WhatsApp send failed:", res.status);
+        })
+        .catch((err) => console.warn("Cart PDF WhatsApp send failed:", err));
+}
+
+
+
 
             async function downloadCartPdf(btn) {
                 const keys = Object.keys(cart);
@@ -7023,16 +7047,44 @@ doc.text("Company's Bank Details", bx, lowTop + 3.8);
                 openDialog(document.getElementById("enquiryModal"), ".enquiry-modal-box");
             }
 
+           // function closeEnquiryModal() {
+            //    const modal = document.getElementById("enquiryModal");
+            //    if (!modal?.open) return;
+            //    const doClose = () => modal.close();
+            //    if (document.startViewTransition && !prefersReducedMotion()) {
+            //       document.startViewTransition(doClose);
+            //    } else {
+            //        doClose();
+            //    }
+            //}
+
+
+
+            // new code after getting error in console 23-10-26
+
             function closeEnquiryModal() {
-                const modal = document.getElementById("enquiryModal");
-                if (!modal?.open) return;
-                const doClose = () => modal.close();
-                if (document.startViewTransition && !prefersReducedMotion()) {
-                    document.startViewTransition(doClose);
-                } else {
-                    doClose();
-                }
-            }
+    const modal = document.getElementById("enquiryModal");
+    if (!modal?.open) return;
+    const doClose = () => {
+        if (modal.open) modal.close();
+    };
+    // View transitions only work while the page is visible (not after a new tab opens).
+    if (document.startViewTransition && !prefersReducedMotion() && document.visibilityState === "visible") {
+        try {
+            const t = document.startViewTransition(doClose);
+            t.ready.catch(() => {});
+            t.updateCallbackDone.catch(() => {});
+            t.finished.catch(() => {});
+        } catch {
+            doClose();
+        }
+    } else {
+        doClose();
+    }
+}
+
+
+
 
             function submitEnquiry() {
                 if (!currentEnquiryProduct) return;
